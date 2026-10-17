@@ -1,85 +1,77 @@
-# Early Engagement Predictions for Online Content
+# Early Engagement Prediction on Hacker News
 
-Jan. 2026 $\rightarrow$ Present
+Predicts whether a new Hacker News story will be in its day's top 30 by score 24 hours after
+posting, using only what is known 30 minutes after posting.
 
-## Introduction
+## Pipeline
 
-Online platforms live and die by early engagement. The first 30–60 minutes of interaction with a post often determines whether it will trend, remain visible, or disappear. This project explores whether we can **predict long-term engagement outcomes from early behavioral signals**.
+1. **Collect** (`data/main.py`). An asyncio collector polls the Hacker News API
+   (`/v0/newstories`) every 10 minutes, stores each new story, and schedules two snapshots per
+   story: one at +30 minutes (features) and one at +24 hours (label). State is in SQLite
+   (`data/hn.sqlite`) so the collector can crash and resume without losing scheduled snapshots.
+2. **Warehouse** (`data/export.sh`). The `stories`, `snapshots` and `snapshot_targets` tables are
+   exported to CSV and loaded into Snowflake, where the label and the training view
+   (`HN_DB.PUBLIC.TRAIN_DATASET_V`) are built. The Snowflake SQL is not in this repository.
+3. **Model** (`models/`). `eda.ipynb` explores the features; `modeling.ipynb` trains the model.
 
-Using structured metadata and early engagement features collected during the first 30 minutes (e.g., votes, comments, velocity metrics, text-based features), I build models that estimate downstream performance such as:
+## Data
 
-* Final score
-* Total comments
-* Long-term visibility
-* Growth trajectories
-
-The project follows a fully end-to-end ML workflow:
-
-* Local data ingestion and preprocessing (SQLite $\rightarrow$ CSV)
-* Cloud storage and warehousing (Snowflake)
-* Feature engineering and aggregation
-* Model training and evaluation (SageMaker / local experimentation)
-* Analysis of feature importance and calibration
-
----
-
-## Modeling Strategies
-
-### 1. Baselines
-
-* **Linear Regression**
-* **Ridge / Lasso**
-* Log-transformed targets to handle heavy-tailed engagement distributions
-
----
-
-### 2. Tree-Based Models
-
-* Random Forest
-* Gradient Boosted Trees (XGBoost)
-* Automatically handles nonlinear interactions
-* Robustness to skewed distributions
-* Expensive hyperparameter tuning
-
----
+- 4,067 stories posted Feb 4-9, 2026 (UTC); 133 (3.3%) are positive.
+- Label `Y_TOP30_DAILY`: the story ranks in the top 30 of its UTC posting day by score at 24 hours.
+- Features at 30 minutes: log(1 + score), log(1 + comments), log(1 + direct replies), posting hour
+  and day of week, Show HN and Ask HN flags, missing-URL flag, and TF-IDF over the title (1-2 grams,
+  `min_df=5`).
 
 ## Results
 
-### Predictive Power Increases Rapidly with Early Signals
+XGBoost (`scale_pos_weight` set per fold for the class imbalance) with hyperparameters from a
+500-trial Optuna search. The objective is mean average precision (AUPRC) over 3-fold stratified
+cross-validation.
 
-* Even the first 5–15 minutes provide non-trivial signal.
-* Velocity-based features often outperform raw counts.
-* Performance improves sharply up to ~30 minutes, then exhibits diminishing returns.
+| model | 3-fold CV AUPRC | positive rate (random-ranking AUPRC) |
+| --- | --- | --- |
+| XGBoost + TF-IDF title features | 0.349 | 0.033 |
 
----
+The CV AUPRC is the best value found by the search, so it is optimistic: the folds used to pick the
+hyperparameters are the ones it is reported on. There is no held-out test set yet, and no linear
+baseline has been run. The notebook's final cell scores the model on its own training data; those
+numbers are not a performance estimate.
 
-### Nonlinear Models Outperform Linear Baselines
+EDA findings (`models/eda.ipynb`): positive stories average 12.3 points and 3.3 comments at 30
+minutes against 1.7 and 0.4 for the rest. Author identity and posting frequency do not correlate with
+the label (r = -0.02). "Show HN" and "Ask HN" titles correlate slightly negatively.
 
-Tree-based models consistently:
+## Run
 
-* Reduce RMSE
-* Improve ranking correlation
-* Better capture threshold effects
+Collector (Python 3.12, `aiohttp`):
 
-However, the linear models remain valuable for interpretability and understanding feature relationships.
+```bash
+cd data
+pip install aiohttp
+bash collect.sh      # python main.py --db hn.sqlite --poll-seconds 600 ...; see main.py --help
+bash export.sh       # writes stories.csv, snapshots.csv, snapshot_targets.csv
+```
 
----
+Load the CSVs into Snowflake and build `TRAIN_DATASET_V`. The notebooks read Snowflake credentials
+from `.env`:
 
-### Practical Implications
+```
+SF_USERNAME=...
+SF_PASSWORD=...
+SF_ACCOUNT=...
+```
 
-This work demonstrates that:
+Notebooks:
 
-* Early engagement dynamics contain strong predictive signal.
-* Simple engineered velocity features can rival complex models.
-* A lightweight, deployable ranking model is feasible in production.
+```bash
+pip install pandas numpy scikit-learn xgboost optuna seaborn snowflake-connector-python python-dotenv jupyter
+jupyter notebook models/
+```
 
----
+## Next steps
 
-## Future Work
-
-* CI/CD and automatic model re-training
-* Survival modeling for time-to-threshold prediction
-* Sequence models over fine-grained engagement streams
-* Causal modeling of intervention effects (e.g., promotion boosts)
-* Uncertainty estimation for risk-aware ranking
-* Real-time inference pipelines
+- Hold out the last day of stories as a test set and report AUPRC there.
+- Add a logistic-regression baseline.
+- Add the Snowflake SQL that builds the label and training view.
+- Add earlier observation points (5, 10, 15 minutes) to measure how prediction quality grows with
+  observation time.
