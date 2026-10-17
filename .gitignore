@@ -1,4 +1,8 @@
 *logs/
 *.env
 *.sqlite-wal
-*.sqlite-shm
+*.sqlite-shm.venv/
+uv.lock
+*.egg-info/
+.ipynb_checkpoints/
+__pycache__/
